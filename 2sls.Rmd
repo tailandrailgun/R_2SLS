@@ -1,0 +1,180 @@
+---
+title: "2SLS"
+author: "--"
+date: ""
+output:
+  html_document:
+    theme: flatly
+    highlight: pygments
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+# knitr globals
+knitr::opts_chunk$set(
+	echo = TRUE,
+	fig.pos = "H",
+	warning = FALSE,
+	message = FALSE
+)
+
+# Set the graphical theme
+ggplot2::theme_set(ggplot2::theme_light())
+
+# load libraries -- install if required
+library(tidyverse)
+library(AER)
+library(haven)
+library(modelsummary)
+library(fixest)
+library(janitor)
+library(data.table)
+library(kableExtra)
+```
+
+
+<div class="alert alert-info">
+  <strong>Group Members:</strong> 
+(1.) Jian Hao Chiah
+(2.) Yunus Emre Bozkurt
+(3.) Nashita Behroz Jalil
+</div>
+
+
+# 2SLS - the Minneapolis domestic violence experiment
+
+Replication of Angrist (2006) found [here](http://masteringmetrics.com/wp-content/uploads/2015/02/Angrist_2006.pdf).  We replicate Table 1, Table 2, and Table 3, and check whether we obtain similiar coefficients.  
+
+```{r}
+library(haven)
+df <- read_dta("http://masteringmetrics.com/wp-content/uploads/2015/02/mdve.dta")
+
+# Generate action assignments (i.e. what are police assigned to do)
+df <- df %>% 
+  rename_all(tolower) %>% 
+  mutate(z_assignment = case_when(
+    t_random == 1 ~ "arrest",
+    t_random == 2 ~ "advise",
+    t_random == 3 ~ "separate"
+  ),
+  d_actual = case_when(
+    t_final == 1 ~ "arrest",
+    t_final == 2 ~ "advise",
+    t_final == 3 ~ "separate",
+    t_final == 4 ~ "other"
+  ),
+  z_coddled = ifelse(z_assignment %in% c("separate", "advise"),1,0),
+  d_coddled = ifelse(d_actual %in% c("separate", "advise"),1,0)
+  ) %>% 
+  filter(d_actual != "other")
+
+df <- df %>% 
+# Add outcomes
+  mutate( # from Table 4; Berk and Sherman, 1988 */
+          pz_separ=1/(1+exp(1.21)),
+          pz_arrest=1/(1+exp(1.21+.9)),
+          pz_advise=1/(1+exp(1.21+.21)),
+          # from Table 6; Berk and Sherman, 1988 
+          pd_separ=1/(1+exp(1.05)),
+          pd_arrest=1/(1+exp(1.05+.82)),
+          pd_advise=1/(1+exp(1.05+.46)),
+          order = row_number()/n()) %>% 
+  group_by(t_random) %>% 
+  mutate(z_rank = row_number()/n()) %>%
+  group_by(t_final) %>%
+  mutate(d_rank = row_number()/n()) %>%
+           
+  ungroup() %>% 
+  mutate(Y = ifelse( (z_assignment == "arrest" & z_rank < pz_arrest) |                 
+                          (z_assignment == "advise" & z_rank < pz_advise) |
+                          (z_assignment == "separate" & z_rank < pz_separ), 1,0)) %>% 
+  mutate(Y_d = ifelse( (d_actual == "arrest" & d_rank < pd_arrest) |                 
+                          (d_actual == "advise" & d_rank < pd_advise) |
+                          (d_actual == "separate" & d_rank < pd_separ), 1,0)) %>% 
+  mutate(#Create Ethnicity dummies
+         year_dumm = ifelse(year == 82, 1, 0),
+         Q1 = ifelse(1<=month & month<=3, 1, 0),
+         Q2 = ifelse(4<=month & month<=6, 1, 0),
+         Q3 = ifelse(7<=month & month<=9, 1, 0),
+         Q4 = ifelse(10<=month & month<=12, 1, 0),
+         mixed = ifelse(v_race != s_race,1,0),
+         non_white = ifelse(v_race == 1, 0, 1),
+         #Create Environment dummies
+         guns_involved = ifelse(2 <= guns & guns <=3,1,0),
+         other_weapon_involved = ifelse (4<=weapon & weapon<=5,1,0),
+         any_weapon = ifelse(guns_involved | other_weapon_involved, 1, 0)) %>%
+
+  select(t_random, z_assignment, t_final, d_actual, z_coddled, d_coddled, Y,Y_d,year_dumm,Q1,Q2,Q3,Q4, mixed, weapon, any_weapon, non_white,s_chem, guns,guns_involved, other_weapon_involved)
+
+order <- c("arrest","advise","separate")
+df <- df %>% mutate(z_assignment = factor(z_assignment, levels = order)) %>%
+  mutate(d_actual = factor(d_actual, levels = order))
+```
+
+
+## Replication of Angrit's Table 1
+
+```{r, eval=TRUE, echo=TRUE}
+df %>%
+  tabyl(z_assignment, d_actual) %>%
+  adorn_totals(c("row", "col")) %>%
+  adorn_percentages( "row", na.rm = TRUE, advise,	arrest,	separate) %>% 
+  adorn_percentages( "col", na.rm = TRUE, Total) %>%
+  adorn_pct_formatting(rounding = "half to even", digits = 1, affix_sign = FALSE) %>%
+  adorn_ns(position = "rear") %>%
+  adorn_title("top", row_name = "Assigned Treatement", col_name = "Actual Treatment") %>%
+  knitr::kable() %>% 
+  kable_classic_2("striped", full_width = F) %>%
+  
+  footnote(general = "The table shows statistics from Sherman and Berk (1984), Table 1.")
+ 
+```
+
+## Replication of Angrit's Table 2
+
+```{r, eval=TRUE, echo=TRUE}
+
+models <- list(
+  first1 = feols(d_coddled ~ z_coddled, data = df),
+  first2 = feols(d_coddled ~ z_coddled + any_weapon + s_chem + year_dumm, data = df),
+  reduced_1 = feols(Y ~ z_coddled, data = df,vcov = "hetero"),
+  reduced_2 = feols(Y ~ z_coddled + any_weapon + s_chem + year_dumm, data = df,vcov = "hetero")
+)
+
+modelsummary(models,
+             gof_omit = '.',
+             title = 'Table 2. First stage and reduced forms for Model 1.',
+             coef_map = c("z_coddled"="Coddled-assigned", "any_weapon" = "Weapon", "s_chem" = "Chem. influence"),
+             stars = T,)  %>% 
+  kable_classic_2(full_width = T) %>% 
+  add_footnote(c('The table reports OLS estimates of the first-stage and reduced form for Model 1 in the text.',
+              '*Other covariates include year and quarter dummies, and dummies for non-white and mixed race.'), notation = "none")
+
+# Notes from the paper - In the first stage, the endogenous right-hand side variable (treatment delivered in the MDVE) is regressed on the exogenous_ covariates plus the instrument (z_coddled in our case).
+
+#Notes from the paper - The first-stage effect of being assigned to the coddling treatment is .79 in a model without covariates and remain same as .79 in a model that controls for a few covariates. These first-stage effects can be seen in the first two columns of Table 2. The reduced form effects of random assignment to the coddling treatment, reported in columns 3 and 4, are about .11, and significantly different from zero with standard errors of .041. The first stage and reduced-form estimates change little when covariates are added to the model, as expected since Zi (z_coddled) was randomly assigned.
+```
+
+## Replication of Angrit's Table 3
+``` {r, eval=TRUE, echo=TRUE}
+models <- list(
+  ols_1 = lm(Y_d ~ d_coddled, data = df),
+  ols_2 = lm(Y_d ~ d_coddled + any_weapon + s_chem + Q1 + Q2 + Q3 + Q4 , data = df),
+  iv_1 = ivreg(Y ~ d_coddled| z_coddled, data = df, vcov = "hetero"),
+  iv_2 = ivreg(Y ~ d_coddled + any_weapon + s_chem + Q1 + Q2 + Q3 + Q4|z_coddled + any_weapon + s_chem + Q1 + Q2 + Q3 + Q4 , data = df, vcov =  "hetero"))
+
+modelsummary(models,
+             gof_omit = '.',
+             title = 'Table 3. OLS and 2SLS estimates for Model 1.',
+             coef_map = c("d_coddled"="Coddled-delivered", "any_weapon" = "Weapon", "s_chem" = "Chem. influence"),
+             stars = T,)  %>% 
+  kable_classic_2(full_width = T) %>% 
+  add_header_above(c(" ", "OLS" = 2, "IV/2SLS" = 2)) %>%
+  add_footnote(c('The Table reports OLS and 2SLS estimates of the structural equation in Model 1.',
+              '*Other covariates include year and quarter dummies, and dummies for non-white and mixed race.'), notation = "none")
+
+#Notes from the paper - The 2SLS estimates associated with the first stage and reduced form estimates in Table 2 are around .15 and .11. These estimates, reported in columns 3 and 4 of Table 3, are about double the size of the corresponding OLS estimates of the effects of delivered treatments, reported in columns 1 and 2 of table 3. Recall that the 2SLS estimates in columns 3 an 4 of Table 3 are essentially a rescaling of the reduced form estimates reported in columns 3 and 4 of Table 2. In particular, the 2SLS estimates are implicitly calculated by dividing the reduced form (or ITT) estimates by the first-stage estimates (or difference in compliance rates between the original treatment and control groups). 
+
+#From the paper -Like the paper, our OLS estimates are low too, due to delivered treatments being contaminated by selection bias. 
+```
+
